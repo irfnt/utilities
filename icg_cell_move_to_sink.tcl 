@@ -1,0 +1,47 @@
+# TCL script to move ICG cell near sink in IC Compiler
+# Assumptions: ICG cell and sink cell names are known
+# Replace <ICG_CELL_NAME> and <SINK_CELL_NAME> with actual cell names
+
+# Set variables for ICG and sink cell names
+set icg_cell "<ICG_CELL_NAME>" ;# e.g., "U_ICG_1"
+set sink_cell "<SINK_CELL_NAME>" ;# e.g., "U_FF_1"
+
+# Step 1: Get sink cell coordinates
+set sink_location [get_attribute [get_cells $sink_cell] origin]
+set sink_x [lindex $sink_location 0]
+set sink_y [lindex $sink_location 1]
+
+# Step 2: Define a placement region around the sink
+# Adjust region size (e.g., 20x20 microns) based on design needs
+set region_size 20
+set llx [expr $sink_x - $region_size/2]
+set lly [expr $sink_y - $region_size/2]
+set urx [expr $sink_x + $region_size/2]
+set ury [expr $sink_y + $region_size/2]
+
+# Create a placement bound for the ICG cell
+create_bounds -name icg_bound -coordinate [list [list $llx $lly] [list $urx $ury]] -exclusive [get_cells $icg_cell]
+
+# Step 3: Run incremental placement to move ICG cell
+place_opt -incremental -effort medium
+
+# Step 4: Legalize placement
+legalize_placement
+
+# Step 5: Verify ICG cell placement
+set icg_new_location [get_attribute [get_cells $icg_cell] origin]
+puts "ICG cell $icg_cell moved to new location: $icg_new_location"
+puts "Sink cell $sink_cell location: $sink_location"
+
+# Step 6: Run timing analysis to check for violations
+report_timing -to [get_cells $sink_cell] -max_paths 10 > timing_report.rpt
+puts "Timing report generated: timing_report.rpt"
+
+# Step 7: Optional - Run CTS if clock tree needs optimization
+# Uncomment the following line if CTS is required
+# clock_opt -from build_clock -to route_clock
+
+# Step 8: Save the design
+save_mw_cel -as updated_design
+
+puts "ICG cell placement completed. Check timing_report.rpt for timing details."
