@@ -1,47 +1,99 @@
-# TCL script to move ICG cell near sink in IC Compiler
-# Assumptions: ICG cell and sink cell names are known
-# Replace <ICG_CELL_NAME> and <SINK_CELL_NAME> with actual cell names
+# TCL script to relocate ICG cell near sink using IC Compiler II native commands
+# Corrected cell filtering and collection handling
 
-# Set variables for ICG and sink cell names
-set icg_cell "<ICG_CELL_NAME>" ;# e.g., "U_ICG_1"
-set sink_cell "<SINK_CELL_NAME>" ;# e.g., "U_FF_1"
+##############################################
+# Step 1: Identify ICG cells and target sinks
+##############################################
 
-# Step 1: Get sink cell coordinates
-set sink_location [get_attribute [get_cells $sink_cell] origin]
-set sink_x [lindex $sink_location 0]
-set sink_y [lindex $sink_location 1]
+# Get all clock gating cells using library attribute
+set icg_lib_cells [get_lib_cells -filter "is_clock_gating_cell==true"]
+if {[sizeof_collection $icg_lib_cells] == 0} {
+    error "No clock gating cells found in library"
+}
 
-# Step 2: Define a placement region around the sink
-# Adjust region size (e.g., 20x20 microns) based on design needs
-set region_size 20
-set llx [expr $sink_x - $region_size/2]
-set lly [expr $sink_y - $region_size/2]
-set urx [expr $sink_x + $region_size/2]
-set ury [expr $sink_y + $region_size/2]
+# Get all ICG instances in design using proper collection filtering
+set icg_cells [get_cells -filter "lib_cell.ref_name == [get_attribute $icg_lib_cells full_name]"]
 
-# Create a placement bound for the ICG cell
-create_bounds -name icg_bound -coordinate [list [list $llx $lly] [list $urx $ury]] -exclusive [get_cells $icg_cell]
+# Alternative method using collection membership
+# set icg_cells [filter_collection [get_cells *] "lib_cell in $icg_lib_cells"]
 
-# Step 3: Run incremental placement to move ICG cell
-place_opt -incremental -effort medium
+if {[sizeof_collection $icg_cells] == 0} {
+    error "No ICG cells found in current design"
+}
 
-# Step 4: Legalize placement
-legalize_placement
+##############################################
+# Step 2: Find driven sinks for first ICG cell
+##############################################
 
-# Step 5: Verify ICG cell placement
-set icg_new_location [get_attribute [get_cells $icg_cell] origin]
-puts "ICG cell $icg_cell moved to new location: $icg_new_location"
-puts "Sink cell $sink_cell location: $sink_location"
+set first_icg [index_collection $icg_cells 0]
+set icg_name [get_attribute $first_icg full_name]
 
-# Step 6: Run timing analysis to check for violations
-report_timing -to [get_cells $sink_cell] -max_paths 10 > timing_report.rpt
-puts "Timing report generated: timing_report.rpt"
+# Get clock output pin of ICG
+set icg_out_pin [get_pins -of $first_icg -filter "direction==out"]
+if {[sizeof_collection $icg_out_pin] == 0} {
+    error "No output pin found on ICG cell $icg_name"
+}
 
-# Step 7: Optional - Run CTS if clock tree needs optimization
-# Uncomment the following line if CTS is required
-# clock_opt -from build_clock -to route_clock
+# Find sinks driven by this ICG
+set driven_sinks [filter_collection \
+    [all_fanout -from $icg_out_pin -endpoints_only] \
+    "object_class==cell && is_sequential==true"
+]
 
-# Step 8: Save the design
-save_mw_cel -as updated_design
+if {[sizeof_collection $driven_sinks] == 0} {
+    error "No sequential sinks found for ICG cell $icg_name"
+}
 
-puts "ICG cell placement completed. Check timing_report.rpt for timing details."
+set target_sink [index_collection $driven_sinks 0]
+set sink_name [get_attribute $target_sink full_name]
+
+##############################################
+# Step 3: Placement optimization (unchanged)
+##############################################
+
+# Get sink coordinates
+set sink_loc [get_attribute [get_cells $sink_name] origin]
+set sink_x [lindex $sink_loc 0]
+set sink_y [lindex $sink_loc 1]
+
+# Create placement boundary (10um x 10um)
+set boundary [list \
+    [expr $sink_x - 5] \
+    [expr $sink_y - 5] \
+    [expr $sink_x + 5] \
+    [expr $sink_y + 5] \
+]
+
+# Apply exclusive boundary
+create_bounds -name ICG_BOUND -type exclusive -coordinates $boundary $icg_name
+
+# Run focused placement optimization
+place_opt -incremental -effort high -optimize_dft
+
+# Legalize placement
+legalize_placement -cells $icg_name
+
+##############################################
+# Step 4: Verification and reporting
+##############################################
+
+# Post-placement validation
+set new_loc [get_attribute [get_cells $icg_name] origin]
+puts "ICG placement results:"
+puts "Initial location: [get_attribute [get_cells $icg_name] original_origin]"
+puts "Optimized location: $new_loc"
+
+# Timing validation
+report_timing -from $icg_name -to $sink_name \
+    -delay_type max \
+    -max_paths 3 \
+    -nets \
+    -input_pins \
+    -file icg_placement_timing.rpt
+
+# Save design state
+save_mw_cel -as "icg_optimized_design"
+
+puts "ICG placement completed successfully"
+puts "Timing report: icg_placement_timing.rpt"
+puts "Optimized design saved as: icg_optimized_design"
